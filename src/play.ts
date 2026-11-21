@@ -1,5 +1,5 @@
 import { Agent, type GameKey } from './agent.ts';
-import { PLAY_BUTTON, readScene } from './vision.ts';
+import { readScene, type Scene } from './vision.ts';
 
 export interface Game {
   screenshot(): Promise<Uint8Array>;
@@ -68,26 +68,29 @@ export async function play(game: Game, options: PlayOptions): Promise<PlayReport
 
   const send = (key: GameKey, why?: string) => {
     const sentAt = Date.now();
-    game
-      .pressKey(key, { settle: false })
-      .then(
-        () => {
-          report.keyMs.push(Date.now() - sentAt);
-          if (why) options.print(`${clock()}  ${dim(`${why} ${key}: Revyl answered in ${((Date.now() - sentAt) / 1000).toFixed(2)} s`)}`);
-        },
-        (error: unknown) => options.print(`${clock()}  ${color(31, `${key} failed: ${error instanceof Error ? error.message : String(error)}`)}`),
-      )
-      .finally(() => agent.keyLanded(key, Date.now()));
+    game.pressKey(key, { settle: false }).then(
+      () => {
+        const tookMs = Date.now() - sentAt;
+        report.keyMs.push(tookMs);
+        if (why) options.print(`${clock()}  ${dim(`${why} ${key}: Revyl answered in ${(tookMs / 1000).toFixed(2)} s`)}`);
+        agent.keyLanded(key, Date.now(), tookMs);
+      },
+      (error: unknown) => {
+        options.print(`${clock()}  ${color(31, `${key} failed: ${error instanceof Error ? error.message : String(error)}`)}`);
+        agent.keyLanded(key, Date.now());
+      },
+    );
   };
 
-  const startNextRun = (scoreBoard: boolean, now: number) => {
-    if (scoreBoard) {
+  const startNextRun = (scene: Scene, now: number) => {
+    if (scene.scoreBoard) {
       if (now - lastPlayTapAt < PLAY_TAP_EVERY_MS) return;
       lastPlayTapAt = now;
       options.print(`${clock()}  score board -> tap PLAY`);
-      game.tap(PLAY_BUTTON).catch(() => undefined);
+      game.tap(scene.playButton).catch(() => undefined);
       return;
     }
+    if (lastPlayTapAt > runOverAt) return;
     if (now - runOverAt < CONTINUE_AFTER_MS || now - lastContinueAt < CONTINUE_EVERY_MS) return;
     lastContinueAt = now;
     send('space');
@@ -128,7 +131,7 @@ export async function play(game: Game, options: PlayOptions): Promise<PlayReport
         runOverAt = Date.now();
         if (report.runs.length >= options.runs) stopped = true;
       } else if (!run && runOverAt) {
-        startNextRun(scene.scoreBoard, Date.now());
+        startNextRun(scene, Date.now());
       }
       const decision = agent.decide(scene, capturedAt, Date.now());
       if (decision.presses.length) report.decisions++;
@@ -146,11 +149,13 @@ export async function play(game: Game, options: PlayOptions): Promise<PlayReport
     }
   };
 
-  const budget = sleep(options.budgetMs).then(() => (stopped = true));
-  const workers = Array.from({ length: SCREENSHOT_WORKERS }, (_, i) => observe((i * 1000) / SCREENSHOT_WORKERS));
-  await Promise.race([budget, Promise.all([...workers, sendTimedKeys()])]);
-  stopped = true;
-  await Promise.allSettled(workers);
+  const budget = setTimeout(() => (stopped = true), options.budgetMs);
+  try {
+    await Promise.all([...Array.from({ length: SCREENSHOT_WORKERS }, (_, i) => observe((i * 1000) / SCREENSHOT_WORKERS)), sendTimedKeys()]);
+  } finally {
+    stopped = true;
+    clearTimeout(budget);
+  }
   if (run) report.runs.push(run);
   options.print('');
   options.print(bold('Summary'));

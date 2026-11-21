@@ -1,5 +1,5 @@
 import { open } from '@revyl/verify';
-import { withFastKeys } from './fast-keys.ts';
+import { withFastInput } from './fast-input.ts';
 import { play } from './play.ts';
 import { decodeFrame, isPlaying } from './vision.ts';
 
@@ -24,9 +24,9 @@ try {
     await session.tap(START_TAP);
     await sleep(3000);
   }
-  const keys = withFastKeys(session);
+  const input = withFastInput(session);
   await play(
-    { screenshot: () => session.screenshot(), pressKey: keys.pressKey, tap: (at) => session.tap(at) },
+    { screenshot: () => session.screenshot(), pressKey: input.pressKey, tap: input.tap },
     { budgetMs, runs, print: (line) => console.log(line) },
   );
 } finally {

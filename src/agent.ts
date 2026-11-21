@@ -33,8 +33,10 @@ const STALE_FRAME_MS = 1200;
 // A tutorial gate takes its key only while its prompt is up, about a second, which is shorter than the
 // screenshot-to-key round trip, so reacting to a prompt is always too late. A missed gate replays on a
 // steady cycle, and some gates follow each other within a second. The agent learns both from what it sees
-// and sends each key ahead of time, to land just after the prompt it expects.
-const SEND_BEFORE_PROMPT_MS = 250;
+// and sends each key ahead of time, so that Revyl answers it about half a second after the prompt it
+// expects. Keys take about 0.8 s on a cloud browser and 0.35 s on a Mac, so it times them by the answers so far.
+const ANSWER_AFTER_PROMPT_MS = 520;
+const FIRST_KEY_GUESS_MS = 770;
 const AIM_NUDGES_MS = [0, -150, 150, -300];
 const NEW_PROMPT_AFTER_MS = 600;
 const FOLLOW_UP_WITHIN_MS = 2000;
@@ -75,9 +77,14 @@ export class Agent {
   private followUps = new Map<Gate, { gate: Gate; afterMs: number }>();
   private attempts = new Map<Gate, number>();
   private schedule: Scheduled[] = [];
+  private keyTimes: number[] = [];
 
-  /** Called when Revyl answers a key (or it fails): screenshots taken after this show its effect, so the agent may decide again. */
-  keyLanded(key: GameKey, now: number): void {
+  /**
+   * Called when Revyl answers a key, with how long it took, or when the key fails: screenshots taken after
+   * this show its effect, so the agent may decide again.
+   */
+  keyLanded(key: GameKey, now: number, tookMs?: number): void {
+    if (tookMs !== undefined) this.keyTimes = [...this.keyTimes, tookMs].slice(-9);
     this.keysInFlight = Math.max(0, this.keysInFlight - 1);
     if (this.keysInFlight === 0) this.settledAfter = now + (key === 'arrowleft' || key === 'arrowright' ? 300 : 450);
   }
@@ -150,7 +157,8 @@ export class Agent {
   private aim(target: Onset): Scheduled {
     const attempt = this.attempts.get(target.gate) ?? 0;
     this.attempts.set(target.gate, attempt + 1);
-    const scheduled = { key: GATE_KEY[target.gate], at: target.at - SEND_BEFORE_PROMPT_MS + AIM_NUDGES_MS[attempt % AIM_NUDGES_MS.length]!, target };
+    const keyMs = this.keyTimes.length ? [...this.keyTimes].sort((x, y) => x - y)[this.keyTimes.length >> 1]! : FIRST_KEY_GUESS_MS;
+    const scheduled = { key: GATE_KEY[target.gate], at: target.at + ANSWER_AFTER_PROMPT_MS - keyMs + AIM_NUDGES_MS[attempt % AIM_NUDGES_MS.length]!, target };
     this.schedule.push(scheduled);
     return scheduled;
   }

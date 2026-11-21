@@ -10,9 +10,19 @@ export interface Frame {
 }
 
 // Every position below is in pixels of a 960-wide screenshot whose game area is 476 rows tall
-// (a 960x540 browser with Poki's player in fullscreen), and is scaled to the real screenshot.
+// (a 960x540 browser with Poki's player in fullscreen). Where the game area has another shape, as on a
+// Mac in Safari fullscreen (1280x736), the game scales its track and its buttons alike, mostly by the
+// height: by the width ratio to the power 0.2 times the height ratio to the power 0.8, measured there.
 const REF_WIDTH = 960;
 const REF_GAME_HEIGHT = 476;
+const HEIGHT_WEIGHT = 0.8;
+
+/** How the reference frame maps onto a screenshot: scaled by `scale` about the middle of the game area. */
+export interface Geometry {
+  scale: number;
+  x0: number;
+  y0: number;
+}
 
 export function decodeFrame(png: Uint8Array): Frame {
   const { width, height, data } = PNG.sync.read(Buffer.from(png));
@@ -33,6 +43,17 @@ export function gameHeight(frame: Frame): number {
   return H;
 }
 
+export function geometry(frame: Frame): Geometry {
+  const gameH = gameHeight(frame);
+  const scale = (frame.width / REF_WIDTH) ** (1 - HEIGHT_WEIGHT) * (gameH / REF_GAME_HEIGHT) ** HEIGHT_WEIGHT;
+  return { scale, x0: frame.width / 2 - (REF_WIDTH / 2) * scale, y0: gameH / 2 - (REF_GAME_HEIGHT / 2) * scale };
+}
+
+/** A reference point in screenshot pixels, for everything placed about the middle of the game. */
+export function toScreen(g: Geometry, x: number, y: number): { x: number; y: number } {
+  return { x: Math.round(g.x0 + x * g.scale), y: Math.round(g.y0 + y * g.scale) };
+}
+
 function rgb(frame: Frame, x: number, y: number): [number, number, number] {
   const xi = Math.min(frame.width - 1, Math.max(0, Math.round(x)));
   const yi = Math.min(frame.height - 1, Math.max(0, Math.round(y)));
@@ -45,11 +66,13 @@ function luma(frame: Frame, x: number, y: number): number {
   return 0.299 * r + 0.587 * g + 0.114 * b;
 }
 
+const lumaRef = (frame: Frame, g: Geometry, x: number, y: number) => luma(frame, g.x0 + x * g.scale, g.y0 + y * g.scale);
+
 const isTextWhite = (frame: Frame, x: number, y: number) => Math.min(...rgb(frame, x, y)) >= 235;
 
 /** A run is on while the blue pause button with its two white bars is in the top-left corner. */
-export function isPlaying(frame: Frame): boolean {
-  const s = frame.width / REF_WIDTH;
+export function isPlaying(frame: Frame, g = geometry(frame)): boolean {
+  const s = g.scale;
   const blue = (x: number) => {
     const [r, g, b] = rgb(frame, x * s, 28 * s);
     return b > 150 && g > 100 && r < 110 && b - r > 70;
@@ -62,10 +85,11 @@ export function isPlaying(frame: Frame): boolean {
  * middle of the screen. The words are found by the gaps between them; the first three are always the same width,
  * and the last one tells the direction: "Up" is short, "Left" medium, and "Right" has a descender where "Down" has none.
  */
-export function readPrompt(frame: Frame): Prompt | null {
-  const { width: W, height: H } = frame;
+export function readPrompt(frame: Frame, g: Geometry): Prompt | null {
+  const W = frame.width;
+  const s = g.scale;
   const rows: number[] = [];
-  for (let y = Math.floor(0.35 * H); y < 0.62 * H; y++) {
+  for (let y = Math.floor(g.y0 + 189 * s); y < g.y0 + 334.8 * s; y++) {
     let count = 0;
     let first = W;
     let last = 0;
@@ -75,7 +99,7 @@ export function readPrompt(frame: Frame): Prompt | null {
       first = Math.min(first, x);
       last = x;
     }
-    if (count > 0.026 * W && Math.abs((first + last) / 2 - W / 2) < 0.03 * W && last - first > 0.15 * W) rows.push(y);
+    if (count > 25 * s && Math.abs((first + last) / 2 - W / 2) < 28.8 * s && last - first > 144 * s) rows.push(y);
   }
   if (rows.length < 3) return null;
   const top = rows[0]!;
@@ -86,7 +110,7 @@ export function readPrompt(frame: Frame): Prompt | null {
     return false;
   };
   const words: Array<{ start: number; width: number }> = [];
-  const gap = Math.max(3, Math.round(0.005 * W));
+  const gap = Math.max(3, Math.round(4.8 * s));
   for (let x = Math.floor(0.15 * W); x < 0.85 * W; x++) {
     if (!ink(x)) continue;
     const start = x;
@@ -97,16 +121,16 @@ export function readPrompt(frame: Frame): Prompt | null {
     }
     words.push({ start, width: x - blank - start });
   }
-  const near = (px: number, ref: number) => Math.abs(px / W - ref / REF_WIDTH) <= 4 / REF_WIDTH;
+  const near = (px: number, ref: number) => Math.abs(px / s - ref) <= 4;
   if (words.length === 3 && near(words[0]!.width, 54) && near(words[1]!.width, 58)) return 'hoverboard';
   if (words.length === 4 && near(words[0]!.width, 37) && near(words[1]!.width, 49) && near(words[2]!.width, 43)) return 'go';
   if (words.length !== 4 || !near(words[0]!.width, 53.5) || !near(words[1]!.width, 63) || !near(words[2]!.width, 36.5)) return null;
   const lastWord = words[3]!;
-  const width = (lastWord.width / W) * REF_WIDTH;
+  const width = lastWord.width / s;
   if (width < 32) return 'jump';
   if (width < 45) return 'left';
   let descender = 0;
-  for (let y = textBottom + 1; y <= textBottom + Math.ceil(0.02 * H); y++) {
+  for (let y = textBottom + 1; y <= textBottom + Math.ceil(10.8 * s); y++) {
     for (let x = lastWord.start; x < lastWord.start + lastWord.width; x++) if (isTextWhite(frame, x, y)) descender++;
   }
   return descender > 2 ? 'right' : 'roll';
@@ -135,12 +159,12 @@ const RAIL_CONTRAST = 12;
 
 const baseSpacing = (y: number) => LANE_SPACING_PER_ROW * (y - VANISH_Y);
 
-function railContrast(frame: Frame, sx: number, sy: number, x: number, y: number, spacing: number): number {
+function railContrast(frame: Frame, g: Geometry, x: number, y: number, spacing: number): number {
   const reach = Math.max(2, Math.round(0.03 * spacing));
   let rail = 0;
-  for (let dx = -reach; dx <= reach; dx++) rail = Math.max(rail, luma(frame, (x + dx) * sx, y * sy));
+  for (let dx = -reach; dx <= reach; dx++) rail = Math.max(rail, lumaRef(frame, g, x + dx, y));
   const gap = reach + 2 + 0.05 * spacing;
-  return rail - Math.max(luma(frame, (x - gap) * sx, y * sy), luma(frame, (x + gap) * sx, y * sy));
+  return rail - Math.max(lumaRef(frame, g, x - gap, y), lumaRef(frame, g, x + gap, y));
 }
 
 export interface Track {
@@ -151,14 +175,12 @@ export interface Track {
   fit: number;
 }
 
-export function findTrack(frame: Frame, gameH: number): Track {
-  const sx = frame.width / REF_WIDTH;
-  const sy = gameH / REF_GAME_HEIGHT;
+export function findTrack(frame: Frame, g: Geometry): Track {
   const cache = new Map<number, number>();
   const contrastAt = (x: number, y: number, s: number) => {
     const key = Math.round(x) * 1000 + y;
     let c = cache.get(key);
-    if (c === undefined) cache.set(key, (c = railContrast(frame, sx, sy, x, y, s)));
+    if (c === undefined) cache.set(key, (c = railContrast(frame, g, x, y, s)));
     return c;
   };
   let best: Track = { zoom: 1, shift: 0, fit: 0 };
@@ -197,8 +219,8 @@ export interface LaneView {
 
 // Far away the track bends, so a straight perspective model misses the rails. Past FOLLOW_FROM_Y each
 // rail is followed upward from where the model last fits, a pixel or two at a time.
-function followRailsVisible(frame: Frame, track: Track, lane: Lane, sx: number, sy: number): Map<number, boolean> {
-  const luma2 = (x: number, y: number) => luma(frame, x * sx, y * sy);
+function followRailsVisible(frame: Frame, g: Geometry, track: Track, lane: Lane): Map<number, boolean> {
+  const luma2 = (x: number, y: number) => lumaRef(frame, g, x, y);
   const at = (y: number, side: number) => {
     const spacing = track.zoom * baseSpacing(y);
     return CENTER_X + (track.shift + lane) * spacing + side * RAIL_OFFSET * spacing;
@@ -233,12 +255,10 @@ function followRailsVisible(frame: Frame, track: Track, lane: Lane, sx: number, 
   return visible;
 }
 
-export function viewLane(frame: Frame, track: Track, lane: Lane, gameH: number): LaneView {
-  const sx = frame.width / REF_WIDTH;
-  const sy = gameH / REF_GAME_HEIGHT;
+export function viewLane(frame: Frame, g: Geometry, track: Track, lane: Lane): LaneView {
   const runnersLane = lane === -Math.round(track.shift);
   const start = runnersLane ? VANISH_Y + (ABOVE_HEAD_Y - VANISH_Y) * track.zoom : NEAR_Y;
-  const followed = followRailsVisible(frame, track, lane, sx, sy);
+  const followed = followRailsVisible(frame, g, track, lane);
   const rows: number[] = [];
   const visible: boolean[] = [];
   for (let y = Math.round(start); y >= FAR_Y; y -= 2) {
@@ -251,7 +271,7 @@ export function viewLane(frame: Frame, track: Track, lane: Lane, gameH: number):
     const spacing = track.zoom * baseSpacing(y);
     const center = CENTER_X + (track.shift + lane) * spacing;
     const offset = RAIL_OFFSET * spacing;
-    visible.push(railContrast(frame, sx, sy, center - offset, y, spacing) > RAIL_CONTRAST || railContrast(frame, sx, sy, center + offset, y, spacing) > RAIL_CONTRAST);
+    visible.push(railContrast(frame, g, center - offset, y, spacing) > RAIL_CONTRAST || railContrast(frame, g, center + offset, y, spacing) > RAIL_CONTRAST);
   }
   const hiddenFrom = (i: number) => {
     if (rows[i]! >= HORIZON_Y) return visible.slice(i, i + NEAR_RUN).length === NEAR_RUN && visible.slice(i, i + NEAR_RUN).every((v) => !v);
@@ -270,13 +290,13 @@ export function viewLane(frame: Frame, track: Track, lane: Lane, gameH: number):
 export type Lane = -1 | 0 | 1;
 
 /** The green PLAY button on the score board shown after a run ends. */
-export const PLAY_BUTTON = { x: 548, y: 434 };
+const PLAY_BUTTON = { x: 548, y: 434 };
 
-export function isScoreBoard(frame: Frame): boolean {
+export function isScoreBoard(frame: Frame, geo: Geometry): boolean {
   let green = 0;
   for (let y = 418; y < 452; y += 2) {
     for (let x = 500; x < 600; x += 2) {
-      const [r, g, b] = rgb(frame, x, y);
+      const [r, g, b] = rgb(frame, geo.x0 + x * geo.scale, geo.y0 + y * geo.scale);
       if (Math.abs(r - 44) < 14 && Math.abs(g - 125) < 16 && b < 30) green++;
     }
   }
@@ -287,6 +307,8 @@ export interface Scene {
   playing: boolean;
   /** The score board with its PLAY button is up. */
   scoreBoard: boolean;
+  /** Where the score board's PLAY button is, in screenshot pixels. */
+  playButton: { x: number; y: number };
   prompt: Prompt | null;
   track: Track;
   /** The runner's lane: -1 left, 0 middle, 1 right. */
@@ -296,16 +318,17 @@ export interface Scene {
 
 export function readScene(png: Uint8Array): Scene {
   const frame = decodeFrame(png);
-  const gameH = gameHeight(frame);
-  const playing = isPlaying(frame);
-  const track = findTrack(frame, gameH);
+  const g = geometry(frame);
+  const playing = isPlaying(frame, g);
+  const track = findTrack(frame, g);
   const lane = Math.max(-1, Math.min(1, -Math.round(track.shift))) as Lane;
   return {
     playing,
-    scoreBoard: !playing && isScoreBoard(frame),
-    prompt: playing ? readPrompt(frame) : null,
+    scoreBoard: !playing && isScoreBoard(frame, g),
+    playButton: toScreen(g, PLAY_BUTTON.x, PLAY_BUTTON.y),
+    prompt: playing ? readPrompt(frame, g) : null,
     track,
     lane,
-    lanes: { [-1]: viewLane(frame, track, -1, gameH), 0: viewLane(frame, track, 0, gameH), 1: viewLane(frame, track, 1, gameH) } as Record<Lane, LaneView>,
+    lanes: { [-1]: viewLane(frame, g, track, -1), 0: viewLane(frame, g, track, 0), 1: viewLane(frame, g, track, 1) } as Record<Lane, LaneView>,
   };
 }
